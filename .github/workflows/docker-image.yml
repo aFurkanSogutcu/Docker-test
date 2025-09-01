@@ -1,0 +1,68 @@
+name: Build, Test & Push to GHCR
+
+on:
+  push:
+    branches: ["master"]   # default branch'in "main" ise burayı "main" yap
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+  packages: write   # GHCR'a push için gerekli
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set repo/image metadata
+        id: meta
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/${REPO_LOWER}" >> $GITHUB_OUTPUT
+          echo "TAG_SHA=${{ github.sha }}"    >> $GITHUB_OUTPUT
+          if [ "${{ github.ref_name }}" = "${{ github.event.repository.default_branch }}" ]; then
+            echo "IS_DEFAULT_BRANCH=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_DEFAULT_BRANCH=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }} .
+
+      - name: Run container & smoke test (expects 200)
+        run: |
+          docker run -d --rm -p 8080:80 --name web ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }}
+          # Uygulama ayağa kalksın diye birkaç deneme
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || true)
+            if [ "$code" = "200" ]; then
+              echo "✅ 200 OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "❌ Servis 200 dönmedi"
+          docker logs web || true
+          exit 1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image (SHA tag)
+        run: |
+          docker push ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }}
+
+      - name: Push image (latest on default branch)
+        if: steps.meta.outputs.IS_DEFAULT_BRANCH == 'true'
+        run: |
+          docker tag  ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }}  ${{ steps.meta.outputs.IMAGE }}:latest
+          docker push ${{ steps.meta.outputs.IMAGE }}:latest
