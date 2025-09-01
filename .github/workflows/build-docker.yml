@@ -1,18 +1,46 @@
-name: Docker Image CI
+name: CI (Build, Test, Push)
 
 on:
   push:
-    branches: [ "master" ]
   pull_request:
-    branches: [ "master" ]
+
+permissions:
+  contents: read
+  packages: write   # GHCR'a push için gerekli
 
 jobs:
-
-  build:
-
+  ci:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      - uses: actions/checkout@v4
+
+      # REPO (lowercase) ve TAG (commit SHA) değişkenleri
+      - name: Set vars
+        run: |
+          echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "TAG=${{ github.sha }}" >> $GITHUB_ENV
+
+      - name: Build image
+        run: docker build -t ghcr.io/$REPO:$TAG .
+
+      - name: Smoke test (expect 200)
+        run: |
+          docker run -d --rm -p 8080:80 --name web ghcr.io/$REPO:$TAG
+          for i in {1..15}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || true)
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 2
+          done
+          echo "Service did not return 200"
+          docker logs web || true
+          exit 1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image (SHA tag)
+        run: docker push ghcr.io/$REPO:$TAG
